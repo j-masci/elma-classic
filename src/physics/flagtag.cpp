@@ -1,8 +1,6 @@
 #include "physics/flagtag.h"
 #include "physics/init.h"
 
-constexpr double WHEEL_DIST_SQUARED = 0.64;
-constexpr double IMMUNITY_DIST_SQUARED = 1.44;
 
 bool FlagTagAHasFlag = false;
 bool FlagTagImmunity = false;
@@ -28,6 +26,9 @@ static bool points_within_distance(vect2* v1, vect2* v2, double distance_squared
 }
 
 void flagtag(double time) {
+    // Live tuning applies to both bikes and tag distances immediately.
+    const double WHEEL_DIST_SQUARED = 0.64 * WheelSizeScale * WheelSizeScale;
+    const double IMMUNITY_DIST_SQUARED = 1.44 * WheelSizeScale * WheelSizeScale;
     if (FlagTagImmunity) {
         if (!points_within_distance(&Motor1->left_wheel.r, &Motor2->left_wheel.r,
                                     IMMUNITY_DIST_SQUARED) &&

@@ -13,7 +13,10 @@
 #include "main.h"
 #include "physics/flagtag.h"
 #include "physics/init.h"
+#include "physics/killer_shot.h"
+#include "physics/rain.h"
 #include "physics/pacer.h"
+#include "physics/projectile.h"
 #include "pic/abc8.h"
 #include "pic/anim.h"
 #include "pic/lgr.h"
@@ -450,7 +453,10 @@ static void render_bike(pic8* pic, bool has_flag, vect2 bottomleft_corner, const
     }
 
     // Render background wheels
-    constexpr double WHEEL_RENDER_RADIUS = 0.395;
+    // Keep the sprite's original inset relative to the physical radius and
+    // apply the same scale in both drawing passes. Use the session's scale here:
+    // replay/network poses carry positions, not a wheel-size setting.
+    const double WHEEL_RENDER_RADIUS = 0.395 * WheelSizeScale;
     if (left_wheel_in_back) {
         render_rigidbody(left_wheel_r, WHEEL_RENDER_RADIUS, mot->left_wheel.rotation, pic,
                          bike->wheel, false);
@@ -812,6 +818,101 @@ static void render_view(bool player1, bool bottom_player, pic8* pic, double time
                             GameViewHeight - 1);
     }
 
+    // Experimental dynamic geometry: overlay the current physics position after
+    // foreground pictures, before HUD. fill_box clips all four axis-aligned edges.
+    for (const auto& square : projectile::states()) {
+        if (!square.active) {
+            continue;
+        }
+        vect2 p = (square.position - bottomleft_corner) * MetersToPixels;
+        int half = std::max(1, (int)(projectile::HALF_SIZE * MetersToPixels));
+        int x = (int)p.x;
+        int y = (int)p.y;
+        // Choose a bright colour from the active LGR rather than assuming its palette.
+        unsigned char colour = 0;
+        int brightness = -1;
+        for (int i = 0; i < 256; ++i) {
+            int value = Lgr->palette_data[i * 3] + Lgr->palette_data[i * 3 + 1] +
+                        Lgr->palette_data[i * 3 + 2];
+            if (value > brightness) {
+                brightness = value;
+                colour = (unsigned char)i;
+            }
+        }
+        pic->fill_box(x - half, y - half, x + half, y - half + 1, colour);
+        pic->fill_box(x - half, y + half - 1, x + half, y + half, colour);
+        pic->fill_box(x - half, y - half, x - half + 1, y + half, colour);
+        pic->fill_box(x + half - 1, y - half, x + half, y + half, colour);
+    }
+
+    // Separate tiny hazard circles, drawn after level art. Palette indices can
+    // vary by LGR, so find its darkest/lightest entries rather than assuming 0/255.
+    unsigned char black = 0;
+    unsigned char white = 0;
+    int darkest = 1000;
+    int lightest = -1;
+    for (int i = 0; i < 256; ++i) {
+        int value = Lgr->palette_data[i * 3] + Lgr->palette_data[i * 3 + 1] + Lgr->palette_data[i * 3 + 2];
+        if (value < darkest) {
+            darkest = value;
+            black = (unsigned char)i;
+        }
+        if (value > lightest) {
+            lightest = value;
+            white = (unsigned char)i;
+        }
+    }
+    for (const auto& shot : killer_shot::shots()) {
+        if (!shot.active) {
+            continue;
+        }
+        vect2 p = (shot.position - bottomleft_corner) * MetersToPixels;
+        int radius = std::max(2, (int)(killer_shot::RADIUS * MetersToPixels));
+        if (p.x + radius < 0 || p.x - radius >= pic->get_width() ||
+            p.y + radius < 0 || p.y - radius >= pic->get_height()) {
+            continue;
+        }
+        unsigned char color = killer_shot::flash_white(shot) ? white : black;
+        // A one-pixel contrasting rim keeps the black shot visible on dark art.
+        for (int ring = 1; ring >= 0; --ring) {
+            int r = radius + ring;
+            unsigned char fill = ring ? (color == black ? white : black) : color;
+            for (int y = -r; y <= r; ++y) {
+                int span = (int)std::sqrt((double)(r * r - y * y));
+                pic->fill_box((int)p.x - span, (int)p.y + y, (int)p.x + span, (int)p.y + y, fill);
+            }
+        }
+    }
+    if (loop == GameLoop::Game && player1 && !driv.dead && !spy_kuski &&
+        current_camera.mode == CameraMode::Normal) {
+        vect2 from = (killer_shot::handlebar_position(*driv.mot) - bottomleft_corner) * MetersToPixels;
+        vect2 to = (killer_shot::muzzle_position(*driv.mot) + killer_shot::aim_direction(*driv.mot) * 0.6 -
+                    bottomleft_corner) * MetersToPixels;
+        vect2 delta = to - from;
+        int steps = std::max(1, (int)std::ceil(std::max(std::abs(delta.x), std::abs(delta.y))));
+        // pic8::line only supports horizontal/vertical lines, so rasterise this
+        // short barrel indicator directly. The angle mirrors when the bike turns.
+        for (int pass = 0; pass < 2; ++pass) {
+            for (int i = 0; i <= steps; ++i) {
+                vect2 p = from + delta * ((double)i / steps);
+                if (pass == 0) {
+                    pic->fill_box((int)p.x - 1, (int)p.y - 1, (int)p.x + 1, (int)p.y + 1, white);
+                } else {
+                    pic->ppixel((int)p.x, (int)p.y, black);
+                }
+            }
+        }
+    }
+
+    rain::render(*pic, bottomleft_corner, MetersToPixels, Lgr->palette_data);
+    if (loop==GameLoop::Game && current_camera.mode==CameraMode::Normal && !spy_kuski) {
+        for (const driver* rider : {&driv, &other_driv}) {
+            if (Single && rider==&other_driv) continue;
+            if (!rider->dead && rain::fully_submerged(rider->mot->head_r,HeadRadius))
+                rain::render_breathing(*pic,rider->mot->head_r,HeadRadius,bottomleft_corner,MetersToPixels,white);
+        }
+    }
+
     // Draw the minimap
     if (driv.hud->minimap) {
         if (Single) {
@@ -843,6 +944,10 @@ static void render_view(bool player1, bool bottom_player, pic8* pic, double time
     std::vector<info_panel_row> info_rows;
 
     if (loop == GameLoop::Game) {
+        int filled_puddles = (int)std::count_if(rain::puddles().begin(), rain::puddles().end(),
+                                               [](const rain::Puddle& p) { return p.area > 0; });
+        info_rows.push_back({"raindrops", std::format("{} / {}", rain::drop_count(), rain::MAX_DROPS)});
+        info_rows.push_back({"puddles", std::to_string(filled_puddles)});
         if (current_camera.mode != CameraMode::MapViewer) {
             if (EolSettings->show_speedometer()) {
                 info_rows.push_back({"max speed", driv.stats.format_max_speed()});

@@ -56,18 +56,22 @@ void init_motor(motorst* motor) {
 
     motor->left_wheel.rotation = 0.0;
     motor->left_wheel.angular_velocity = 0.0;
-    motor->left_wheel.radius = 0.4;
+    // Increase the actual collision radius as well as the drawn size. Keep mass,
+    // suspension geometry unchanged; throttle has its own experiment control.
+    // Inertia scales with radius squared for the same mass distribution;
+    // 0.32 is the original wheel's tuned inertia, not a new disk approximation.
+    motor->left_wheel.radius = STANDARD_WHEEL_RADIUS * WheelSizeScale;
     motor->left_wheel.mass = 10;
-    motor->left_wheel.inertia = 0.32;
+    motor->left_wheel.inertia = 0.32 * WheelSizeScale * WheelSizeScale;
     motor->left_wheel.r = vect2(1.9, 3.0);
     motor->left_wheel.v = vect2(0, 0);
     motor->left_wheel.touching_edge = false;
 
     motor->right_wheel.rotation = 0.0;
     motor->right_wheel.angular_velocity = 0.0;
-    motor->right_wheel.radius = 0.4;
+    motor->right_wheel.radius = STANDARD_WHEEL_RADIUS * WheelSizeScale;
     motor->right_wheel.mass = 10;
-    motor->right_wheel.inertia = 0.32;
+    motor->right_wheel.inertia = 0.32 * WheelSizeScale * WheelSizeScale;
     motor->right_wheel.r = vect2(3.6, 3.0);
     motor->right_wheel.v = vect2(0, 0);
     motor->right_wheel.touching_edge = false;

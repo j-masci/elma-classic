@@ -51,6 +51,11 @@ static bool get_anchor_point(vect2 r, double radius, segment* seg, vect2* point)
 }
 
 int get_two_anchor_points(vect2 r, double radius, vect2* point1, vect2* point2) {
+    // Broad phase: the level loader has already put nearby edges into each
+    // grid cell, padded for the largest wheel/head. Narrow phase below computes
+    // the closest point on each candidate segment and compares its distance
+    // with this circle's radius. Return at most two distinct contact anchors.
+    // Moving level vertices alone will not update these cached segments/cells.
     // Iterate through all the lines in one collision cell
     Segments->iterate_collision_grid_cell_segments(r);
     int anchor_point_count = 0;

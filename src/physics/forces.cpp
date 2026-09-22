@@ -8,6 +8,8 @@
 #include "physics/collision.h"
 #include "physics/init.h"
 #include "physics/move.h"
+#include "physics/projectile.h"
+#include "physics/rain.h"
 #include "renderer/canvas.h"
 #include "renderer/timer.h"
 #include "util/util.h"
@@ -146,6 +148,7 @@ void reset_motor_forces(motorst* mot) {
     mot->left_volt_time = -1.0;
     mot->angular_velocity_pre_right_volt = -1.0;
     mot->angular_velocity_pre_left_volt = -1.0;
+    mot->right_volt_water_scale = mot->left_volt_water_scale = 1.0;
 }
 
 void set_head_position(motorst* mot) {
@@ -160,6 +163,15 @@ void set_head_position(motorst* mot) {
     }
 }
 
+// One physics substep, not one rendered frame. Order matters:
+// 1. Build the chassis's local axes and gas/brake wheel torques.
+// 2. Calculate suspension forces and their equal/opposite chassis reactions.
+// 3. Apply the game's timed volt impulses (these are gameplay rules, not a
+//    conservation-of-energy simulation).
+// 4. Add gravity and integrate rider, chassis, then each wheel. Wheel movement
+//    resolves terrain contacts; the chassis itself passes through terrain.
+// 5. Derive head position. The caller checks death/apples/finish afterwards.
+// All suspension forces are evaluated before any rigid body is advanced.
 void simulate_bike_physics(motorst* mot, double time, double dt, bool gas, bool brake,
                            bool right_volt, bool left_volt) {
     // Initialize bike friction volume (squeak sound)
@@ -181,7 +193,7 @@ void simulate_bike_physics(motorst* mot, double time, double dt, bool gas, bool 
     double torque_right_wheel = 0.0;
     if (gas) {
         double MAX_ANGULAR_VELOCITY = 110.0;
-        double GAS_TORQUE = 600.0;
+        double GAS_TORQUE = 600.0 * ThrottlePowerScale;
         if (mot->flipped_bike) {
             if (mot->left_wheel.angular_velocity > -MAX_ANGULAR_VELOCITY) {
                 torque_left_wheel = -GAS_TORQUE;
@@ -251,7 +263,7 @@ void simulate_bike_physics(motorst* mot, double time, double dt, bool gas, bool 
     if (mot->volting_right &&
         (right_volt || left_volt || time > mot->right_volt_time + VoltDelay * 0.25)) {
         // Remove the rotation obtained at the beginning of the volt
-        mot->bike.angular_velocity += VOLT_ANGULAR_VELOCITY;
+        mot->bike.angular_velocity += VOLT_ANGULAR_VELOCITY * mot->right_volt_water_scale;
         // We need to be spinning at least as fast as before the start of the volt!
         // If we've slowed down, magically increase the spin speed to match the prevolt speed!
         // This is basically a mechanism where you can "spend" the angular momentum you got at the
@@ -278,7 +290,7 @@ void simulate_bike_physics(motorst* mot, double time, double dt, bool gas, bool 
     // End a left volt (same as above with different alovolt implications)
     if (mot->volting_left &&
         (right_volt || left_volt || time > mot->left_volt_time + VoltDelay * 0.25)) {
-        mot->bike.angular_velocity -= VOLT_ANGULAR_VELOCITY;
+        mot->bike.angular_velocity -= VOLT_ANGULAR_VELOCITY * mot->left_volt_water_scale;
         // Alovolt penalty: You can't speed up during the alovolt because the
         // extra momentum will be removed by this check
         // e.g. your left wheel is bumped upwards and you gain spin speed
@@ -303,6 +315,7 @@ void simulate_bike_physics(motorst* mot, double time, double dt, bool gas, bool 
         mot->volting_right = true;
         mot->angular_velocity_pre_right_volt = mot->bike.angular_velocity;
         mot->right_volt_time = time;
+        mot->right_volt_water_scale = 1.0;
         mot->bike.angular_velocity -= VOLT_ANGULAR_VELOCITY;
     }
     // Start a new Left Volt (same thing as right volt)
@@ -311,6 +324,7 @@ void simulate_bike_physics(motorst* mot, double time, double dt, bool gas, bool 
         mot->volting_left = true;
         mot->angular_velocity_pre_left_volt = mot->bike.angular_velocity;
         mot->left_volt_time = time;
+        mot->left_volt_water_scale = 1.0;
         mot->bike.angular_velocity += VOLT_ANGULAR_VELOCITY;
     }
 
@@ -344,6 +358,8 @@ void simulate_bike_physics(motorst* mot, double time, double dt, bool gas, bool 
         direction = vect2(1.0, 0.0);
         break;
     }
+    const vect2 previous_left_wheel = mot->left_wheel.r;
+    const vect2 previous_right_wheel = mot->right_wheel.r;
     body_movement(mot, direction, i1, j1, dt);
     rigidbody_movement(&mot->bike,
                        force_body_from_left_wheel + force_body_from_right_wheel +
@@ -355,6 +371,12 @@ void simulate_bike_physics(motorst* mot, double time, double dt, bool gas, bool 
     rigidbody_movement(&mot->right_wheel,
                        force_right_wheel + direction * mot->right_wheel.mass * Gravity,
                        torque_right_wheel, dt, true);
+
+    // Dynamic geometry is separate from the level's static contact grid. The
+    // square pushes the wheels, whose suspension reacts on the next substep.
+    projectile::collide_wheel(mot->left_wheel, previous_left_wheel, dt);
+    projectile::collide_wheel(mot->right_wheel, previous_right_wheel, dt);
+    rain::apply_water_drag(*mot, dt);
 
     // Lastly, calculate the head position based on the body position
     set_head_position(mot);

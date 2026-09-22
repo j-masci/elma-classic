@@ -80,7 +80,14 @@ static bool valid_anchor_points_new(vect2 point1, vect2 point2, rigidbody* rb) {
 
 // Handle wheel/bike movement
 // do_collision = true if solid object (i.e. wheels and not bike)
+// This is a specialised circle-versus-static-terrain solver, not a general
+// polygon rigid-body engine. Contacts are queried at the current position:
+// correct overlap, remove inward velocity, then advance by dt. There is no
+// swept collision test, so sufficiently fast movement can tunnel through edges.
+// Zero contacts use semi-implicit Euler (update velocity before position);
+// one contact constrains motion to rolling; two retained contacts stop the wheel.
 void rigidbody_movement(rigidbody* rb, vect2 force, double torque, double dt, bool do_collision) {
+    const vect2 incoming_velocity = rb->v;
     int anchor_point_count = 0;
     vect2 point1;
     vect2 point2;
@@ -169,6 +176,20 @@ void rigidbody_movement(rigidbody* rb, vect2 force, double torque, double dt, bo
     double length = (rb->r - point1).length();
     vect2 n = (rb->r - point1) * (1.0 / length);
     vect2 n90 = rotate_90deg(n);
+    if (SurfaceGrip < 1.0 - 1e-9) {
+        // Keep support in the normal direction, but let the tyre slip along
+        // the edge. Friction is bounded by mu times the normal impulse/load;
+        // zero grip therefore cannot turn engine/brake torque into traction.
+        rb->angular_velocity += torque / rb->inertia * dt;
+        rb->v = n90 * (rb->v * n90 + (force * n90) / rb->mass * dt);
+        double normal_impulse = rb->mass * std::max(0.0, -(incoming_velocity * n)) +
+                                std::max(0.0, -(force * n)) * dt;
+        apply_surface_friction(*rb, n90, normal_impulse);
+        rb->rotation += rb->angular_velocity * dt;
+        rb->r = rb->r + rb->v * dt;
+        return;
+    }
+    // Grip 1 preserves the original game's tuned no-slip solver exactly.
     // Take our linear velocity - since we are rolling, convert it into equivalent angular velocity
     rb->angular_velocity = rb->v * n90 * (1.0 / rb->radius);
     torque += force * n90 * rb->radius;
