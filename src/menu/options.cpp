@@ -9,12 +9,17 @@
 #include "menu/pic.h"
 #include "menu/player.h"
 #include "pic/surface.h"
+#include "physics/init.h"
+#include "physics/killer_shot.h"
+#include "physics/rain.h"
+#include "physics/projectile.h"
 #include "platform/implementation.h"
 #include "renderer/canvas.h"
 #include "util/file_iter.h"
 #include <cmath>
 #include <cstring>
 #include <format>
+#include <initializer_list>
 
 void menu_about() {
     BallSpeed = 10.0;
@@ -210,6 +215,97 @@ static void menu_cripples() {
     }
 }
 
+// Lightweight, session-only controls: reuse the existing Enter-to-cycle menu
+// rather than adding experimental values to the persisted/network settings API.
+static double next_experiment_value(double value, std::initializer_list<double> choices) {
+    for (double choice : choices) {
+        if (choice > value + 0.0001) {
+            return choice;
+        }
+    }
+    return *choices.begin();
+}
+
+static void menu_experiments() {
+    int selected = 0;
+    while (true) {
+        menu_nav nav("Experiments (this session)");
+        nav.x_left = 0;
+        nav.x_right = 390;
+        nav.y_entries = 77;
+        nav.dy = 28;
+        nav.select_row(selected);
+        nav.add_row("Rain / metre / second:", std::format("{:.2f}", rain::settings().frequency), NAV_FUNC() {
+            auto& rate = rain::settings().frequency;
+            rate = next_experiment_value(rate, {0.0, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0});
+        });
+        nav.add_row("Clear rain", NAV_FUNC() { rain::clear(); });
+        nav.add_row("Water resistance:", std::format("{:.0f}%", rain::settings().water_resistance*100), NAV_FUNC() {
+            auto& resistance=rain::settings().water_resistance;
+            resistance=next_experiment_value(resistance,{0.0,0.15,0.35,0.5,0.75,1.0});
+        });
+        nav.add_row("Traction (9/0):", std::format("{:.1f}", SurfaceGrip), NAV_FUNC() {
+            set_surface_grip(SurfaceGrip >= 1.0 - 1e-9 ? 0.0 : SurfaceGrip + 0.1);
+        });
+        nav.add_row("Wheel size (O/P):", std::format("{:.1f}x", WheelSizeScale), NAV_FUNC() {
+            set_wheel_size_scale(next_experiment_value(WheelSizeScale,
+                                                       {0.5, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0}));
+        });
+        nav.add_row("Throttle (Ctrl O/P):", std::format("{:.2f}x", ThrottlePowerScale), NAV_FUNC() {
+            set_throttle_power_scale(next_experiment_value(ThrottlePowerScale,
+                                                           {0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0}));
+        });
+        nav.add_row("Shot speed:", std::format("{:.1f}", projectile::settings().speed), NAV_FUNC() {
+            auto& s = projectile::settings();
+            s.speed = next_experiment_value(s.speed, {3.0, 4.5, 6.2, 8.0, 10.0, 15.0});
+        });
+        nav.add_row("Shot gravity:", std::format("{:.1f}", projectile::settings().gravity), NAV_FUNC() {
+            auto& s = projectile::settings();
+            s.gravity = next_experiment_value(s.gravity, {0.0, 2.5, 5.0, 10.0, 15.0, 20.0});
+        });
+        nav.add_row("Shot angle:", std::format("{:.0f} degrees", projectile::settings().elevation_degrees),
+                    NAV_FUNC() {
+                        auto& s = projectile::settings();
+                        s.elevation_degrees = next_experiment_value(s.elevation_degrees,
+                                                                    {0.0, 10.0, 15.0, 25.0, 35.0, 45.0});
+                    });
+        nav.add_row("Shot delay:", std::format("{:.1f}s", projectile::settings().delay_seconds), NAV_FUNC() {
+            auto& s = projectile::settings();
+            s.delay_seconds = next_experiment_value(s.delay_seconds, {0.1, 0.3, 0.4, 0.5, 0.8, 1.0});
+        });
+        nav.add_row("Square collisions:", projectile::settings().collide_with_squares ? "Stop" : "Pass through",
+                    NAV_FUNC() {
+                        auto& s = projectile::settings();
+                        s.collide_with_squares = !s.collide_with_squares;
+                        projectile::reset(); // Do not enable solidity on already-overlapping shots.
+                    });
+        nav.add_row("Killer speed:", std::format("{:.0f}", killer_shot::settings().speed), NAV_FUNC() {
+            auto& s = killer_shot::settings();
+            s.speed = next_experiment_value(s.speed, {12.0, 18.0, 24.0, 32.0, 48.0});
+        });
+        nav.add_row("Killer delay:", std::format("{:.2f}s", killer_shot::settings().delay_seconds), NAV_FUNC() {
+            auto& s = killer_shot::settings();
+            s.delay_seconds = next_experiment_value(s.delay_seconds, {0.1, 0.15, 0.25, 0.4, 0.5, 1.0});
+        });
+        nav.add_row("Reset experiments", NAV_FUNC() {
+            set_wheel_size_scale(1.0);
+            set_throttle_power_scale(1.0);
+            set_surface_grip(1.0);
+            rain::settings() = rain::Settings{};
+            rain::clear();
+            projectile::settings() = projectile::Settings{};
+            projectile::reset();
+            killer_shot::settings() = killer_shot::Settings{};
+            killer_shot::rotate_aim(10.0 - killer_shot::aim_degrees());
+            killer_shot::reset();
+        });
+        selected = nav.navigate();
+        if (selected < 0) {
+            return;
+        }
+    }
+}
+
 void menu_options() {
     menu_nav nav("Options");
     nav.x_left = 0;
@@ -273,6 +369,7 @@ void menu_options() {
         nav.add_row("Customize Controls ...", NAV_FUNC() { menu_customize_controls(); });
 
         nav.add_row("Cripples ...", NAV_FUNC() { menu_cripples(); });
+        nav.add_row("Experiments ...", NAV_FUNC() { menu_experiments(); });
 
         BOOL_OPTION("Pics In Background:", pictures_in_background);
 

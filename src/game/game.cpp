@@ -14,7 +14,11 @@
 #include "physics/flagtag.h"
 #include "physics/forces.h"
 #include "physics/init.h"
+#include "physics/killer_shot.h"
+#include "physics/rain.h"
+#include "sound/rain.h"
 #include "physics/pacer.h"
+#include "physics/projectile.h"
 #include "pic/lgr.h"
 #include "platform/implementation.h"
 #include "platform/scancode.h"
@@ -238,6 +242,9 @@ static BikeState handle_object_interaction(driver& driv, int object_id) {
 
 // Subframe physics calculation. Contains all the physics calculations except for bike turning
 static void physics_subframe(driver& driv, double time, double dt) {
+    // One player's complete substep: filter the frame's input, advance physics,
+    // check head/object contacts, record state, then consume gameplay/sound
+    // events. The outer pacer loop may call this repeatedly before rendering.
     motorst* mot = driv.mot;
     player_keys* keys = driv.keys;
     bike_metadata* metadata = &driv.meta;
@@ -284,11 +291,16 @@ static void physics_subframe(driver& driv, double time, double dt) {
         }
     }
 
+    const motorst previous_motor = *mot;
     // Simulate bike physics given validated inputs
     simulate_bike_physics(mot, time, dt, is_gas_down, is_brake_down, right_volt, left_volt);
 
     // Check for head death and record object interactions
     BikeState head_state = check_object_collision(mot);
+    if (projectile::hits_head(mot->head_r, previous_motor.head_r, HeadRadius) ||
+        killer_shot::hits_rider(*mot, previous_motor)) {
+        head_state = BikeState::Dead;
+    }
     if (head_state == BikeState::Dead) {
         driv.sound.friction_volume = 0;
         driv.sound.motor_frequency = -1;
@@ -606,6 +618,8 @@ void reload_graphic_assets() {
 
 // Common setup function
 static void setup_gameloop(const char* filename) {
+    projectile::reset();
+    killer_shot::reset();
     reload_graphic_assets();
 
     load_best_time(filename, Single);
@@ -617,6 +631,14 @@ static void setup_gameloop(const char* filename) {
     }
     Level->flip_objects();
     Level->sort_objects();
+    rain::initialize(*Level);
+    rain_audio::reset();
+    rain::set_impact_listener([](vect2 point, double seconds, bool water) {
+        if (Mute || !State->sound_on) return;
+        vect2 listener=Motor1->bike.r;
+        if (!Single && (point-Motor2->bike.r).length()<(point-listener).length()) listener=Motor2->bike.r;
+        rain_audio::impact(point,seconds,listener,water);
+    });
 
     TotalApples = Level->initialize_objects(Motor1);
     Level->initialize_objects(Motor2);
@@ -648,9 +670,20 @@ struct ScreensaverSuspend {
     ScreensaverSuspend() { disable_screensaver(); }
     ~ScreensaverSuspend() { enable_screensaver(); }
 };
+
+struct ProjectileResetGuard {
+    ~ProjectileResetGuard() {
+        rain::set_impact_listener(nullptr);
+        rain_audio::reset();
+        rain::clear();
+        projectile::reset();
+        killer_shot::reset();
+    }
+};
 } // namespace
 
 int game_loop(const char* filename, CameraMode camera_mode) {
+    ProjectileResetGuard projectile_reset_guard;
     // Bindings during gameplay must be honored by raw scancode: numpad-6
     // is right-volt, not "Right Arrow when NumLock is off".
     NumpadNavGuard numpad_nav_guard;
@@ -717,6 +750,8 @@ int game_loop(const char* filename, CameraMode camera_mode) {
     }
 
     bool both_bikes_alive = true;
+    bool pending_projectile = false;
+    bool pending_killer = false;
     fps::reset();
     while (true) {
         const bool frozen = time == 0.0 && current_camera.mode != CameraMode::MapViewer &&
@@ -730,6 +765,39 @@ int game_loop(const char* filename, CameraMode camera_mode) {
         bool console_was_active = handle_console_input();
 
         if (!frozen) {
+            const bool can_launch = !console_was_active && !Console->is_input_active() &&
+                                    !driv1.dead && current_camera.mode == CameraMode::Normal &&
+                                    !EolClient->spy_kuski();
+            // Preserve a quick tap across a frame with no physics updates.
+            // Holding K repeats at the configured real-second cooldown.
+            if (can_launch) {
+                int grip_change = (int)was_game_key_just_pressed(DIK_0) -
+                                  (int)was_game_key_just_pressed(DIK_9);
+                if (grip_change != 0) {
+                    set_surface_grip(SurfaceGrip + grip_change * 0.1);
+                    StatusMessages->add(std::format("Traction: {:.1f} (0 = ice, 1 = normal)", SurfaceGrip));
+                }
+                const int change = (int)was_game_key_just_pressed(DIK_P) -
+                                   (int)was_game_key_just_pressed(DIK_O);
+                if (change != 0) {
+                    if (is_key_down(DIK_LCONTROL) || is_key_down(DIK_RCONTROL)) {
+                        set_throttle_power_scale(ThrottlePowerScale + change * 0.25);
+                    } else {
+                        set_wheel_size_scale(WheelSizeScale + change * 0.1);
+                    }
+                    StatusMessages->add(std::format("Wheels: {:.1f}x | Throttle: {:.2f}x",
+                                                    WheelSizeScale, ThrottlePowerScale));
+                }
+            }
+            if (!can_launch) {
+                pending_projectile = false;
+                pending_killer = false;
+            } else if (was_game_key_just_pressed(DIK_K)) {
+                pending_projectile = true;
+            }
+            if (can_launch && was_game_key_just_pressed(DIK_L)) {
+                pending_killer = true;
+            }
             pacer::new_frame();
 
             latch_one_frame_brake(driv1);
@@ -750,12 +818,34 @@ int game_loop(const char* filename, CameraMode camera_mode) {
                 }
 
                 fps::count_ups();
+                // Move once, before either bike queries this substep's square.
+                projectile::update(dt);
+                if (can_launch && !driv1.dead) {
+                    double real_seconds = dt / (1000.0 * STOPWATCH_MULTIPLIER * STOPWATCH_TO_PHYS_TIME);
+                    int aim_change = (int)is_game_key_down(DIK_M) - (int)is_game_key_down(DIK_N);
+                    killer_shot::rotate_aim(aim_change * 60.0 * real_seconds);
+                    if (pending_killer || is_game_key_down(DIK_L)) {
+                        killer_shot::spawn(*driv1.mot);
+                        pending_killer = false;
+                    }
+                }
+                // Advance newly fired shots during this same substep as the
+                // shooter, so a fast-moving bike cannot overtake a frozen muzzle.
+                killer_shot::update(dt);
+                rain::update(dt);
+                if (can_launch && !driv1.dead &&
+                    (pending_projectile || is_game_key_down(DIK_K))) {
+                    projectile::spawn(*driv1.mot);
+                    pending_projectile = false;
+                }
                 if (!driv1.dead) {
                     physics_subframe(driv1, time, dt);
                 }
                 if (!Single && !driv2.dead) {
                     physics_subframe(driv2, time, dt);
                 }
+                rain::breathe(0,driv1.mot->head_r,HeadRadius,!driv1.dead,dt);
+                rain::breathe(1,driv2.mot->head_r,HeadRadius,!Single && !driv2.dead,dt);
 
                 if (!Single && both_bikes_alive) {
                     // If both die at same time, player 1 is considered to have died first

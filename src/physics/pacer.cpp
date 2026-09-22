@@ -99,6 +99,10 @@ void new_frame() {
 }
 
 bool subframe(double* out_dt) {
+    // Catch physics up to the wall-clock target in small steps. This is a
+    // bounded variable timestep: most catch-up steps hit PHYS_MAX_TIMESTEP,
+    // but the last can be smaller. A rendered frame can contain many steps.
+    // dt uses the game's physics time units, not wall-clock seconds directly.
     double dt = target_time - time;
     if (0.000001 > dt) {
         return false;

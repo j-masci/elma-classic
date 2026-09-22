@@ -2,6 +2,7 @@
 #include "game/state.h"
 #include "main.h"
 #include "sound/wav.h"
+#include "sound/rain.h"
 #include <algorithm>
 #include <cstring>
 
@@ -399,6 +400,7 @@ void sound_mixer(short* buffer, int buffer_length) {
         return;
     }
     if (Mute || !State->sound_on) {
+        rain_audio::mix(buffer, buffer_length, false);
         if (ActiveWavEvents > 0) {
             ActiveWavEvents = 0;
             for (int i = 0; i < MAX_WAV_EVENTS; i++) {
@@ -430,4 +432,5 @@ void sound_mixer(short* buffer, int buffer_length) {
             WavEventPlaybackIndex[i] += length;
         }
     }
+    rain_audio::mix(buffer, buffer_length, true);
 }
